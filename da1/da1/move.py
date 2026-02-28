@@ -2,7 +2,7 @@
 
 import rclpy 
 from rclpy.node import Node
-from move_ps4.zlac8015d import Controller
+from da1.zlac8015d import Controller
 from std_msgs.msg import Float64MultiArray
 
 # import numpy as np
