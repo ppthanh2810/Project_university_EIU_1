@@ -10,29 +10,30 @@ def generate_launch_description():
     
     return LaunchDescription([
         
-        # Node(
-        #     package='joy',
-        #     executable='joy_node',
-        #     name='joy_node',
-        #     output='screen',
-        #     parameters=[{
-        #         'dev': '/dev/input/js0',
-        #         'deadzone': 0.05,
-        #         'autorepeat_rate': 20.0
-        #     }]
-        # ),
+        Node(
+            package='joy',
+            executable='joy_node',
+            name='joy_node',
+            output='screen',
+            parameters=[{
+                'dev': '/dev/input/js0',
+                'deadzone': 0.05,
+                'autorepeat_rate': 20.0
+            }]
+        ),
         # Node(
         #     package='teleop_twist_joy',
         #     executable='teleop_node',
         #     name='teleop_twist_joy',
-        # ),
-        
-        # Node(
-        #     package='joy_teleop',
-        #     executable='joy_teleop',
-        #     name='joy_teleop',
         #     parameters=[config],
         # ),
+        
+        Node(
+            package='joy_teleop',
+            executable='joy_teleop',
+            name='joy_teleop',
+            parameters=[config],
+        ),
 
         Node(
             package='test_move',

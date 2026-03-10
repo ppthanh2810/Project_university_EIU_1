@@ -4,11 +4,11 @@ joy_teleop:
       type: topic
       interface_type: geometry_msgs/msg/Twist
       topic_name: /cmd_vel
-      deadman_buttons: [5]
+      deadman_buttons: [20]
       axis_mappings:
         linear-x:
           axis: 1
-          scale: 0.18
+          scale: 0.04
           offset: 0.0
         angular-z:
           axis: 3

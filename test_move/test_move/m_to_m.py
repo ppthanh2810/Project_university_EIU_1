@@ -17,8 +17,8 @@ class MtoM (Node):
         self.msg_rpm = Float64MultiArray()
         self.msg_rpm.data = [0.0, 0.0]
 
-        self.motion_sub = self.create_subscription(Twist, "/PT/motion", self.motion_sub_callback, 10)
-        # self.motion_sub = self.create_subscription(Twist, "/cmd_vel", self.motion_sub_callback, 10)
+        # self.motion_sub = self.create_subscription(Twist, "/PT/motion", self.motion_sub_callback, 10)
+        self.motion_sub = self.create_subscription(Twist, "/cmd_vel", self.motion_sub_callback, 10)
         self.move_pub = self.create_publisher(Float64MultiArray, "/PT/move", 10)
         self.timers_ = self.create_timer (0.1, self.move_pub_callback)
 

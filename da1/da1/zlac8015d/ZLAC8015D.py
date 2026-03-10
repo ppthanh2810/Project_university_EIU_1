@@ -241,8 +241,10 @@ class Controller:
 		# fb_R_rpm = np.int16(rpms.registers[1])/10.0
 
 		registers = self.modbus_fail_read_handler(self.L_FB_RPM, 2)
-		fb_L_rpm = np.int16(registers[0])/10.0
-		fb_R_rpm = np.int16(registers[1])/10.0
+		def to_int16(val):
+			return val -65536 if val > 32767 else val
+		fb_L_rpm = to_int16(registers[0])/10.0
+		fb_R_rpm = to_int16(registers[1])/10.0
 
 		return fb_L_rpm, fb_R_rpm
 

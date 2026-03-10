@@ -2,7 +2,7 @@
 
 import rclpy 
 from rclpy.node import Node
-from move_ps4.zlac8015d import Controller
+from test_move.zlac8015d import Controller
 from std_msgs.msg import Float64MultiArray
 
 # import numpy as np
@@ -27,7 +27,7 @@ class Move (Node):
         self.motors.set_rpm (int(msg.data[0]), int(msg.data[1]))
         l_rpm, r_rpm = self.motors.get_rpm ()
         
-        print(f"rpmL-rpmL ouput: {l_rpm: .4f}, {-r_rpm: .4f}")
+        # print(f"rpmL-rpmL ouput: {l_rpm: .4f}, {-r_rpm: .4f}")
 
 def main (args=None):
     rclpy.init(args=args)
