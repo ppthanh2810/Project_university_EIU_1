@@ -9,6 +9,7 @@ from cv_bridge import CvBridge
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
+from std_msgs.msg import Float32
 from vision_msgs.msg import (
     BoundingBox2D,
     Detection2D,
@@ -87,33 +88,72 @@ def nms(boxes, scores, iou_thres):
     return keep
 
 
-class YoloV8PersonDetector(Node):
+class YoloPersonPercentNode(Node):
     def __init__(self):
-        super().__init__("yolov8_person_detector")
+        super().__init__("yolo_person_percent_node")
 
+        # Detect params
         self.declare_parameter("image_topic", "/camera/camera/color/image_raw")
         self.declare_parameter("model", "/home/yolov8n.onnx")
         self.declare_parameter("conf", 0.25)
         self.declare_parameter("iou", 0.45)
+
+        # GPU / ORT params
+        self.declare_parameter("provider", "auto")   # auto | tensorrt | cuda | cpu
+        self.declare_parameter("gpu_device_id", 0)
+        self.declare_parameter("gpu_mem_limit_mb", 2048)
+        self.declare_parameter("trt_fp16", True)
+        self.declare_parameter("trt_workspace_mb", 2048)
+        self.declare_parameter("trt_engine_cache_enable", True)
+        self.declare_parameter("trt_engine_cache_path", "/tmp/ort_trt_cache")
+        self.declare_parameter("intra_op_num_threads", 1)
+        self.declare_parameter("inter_op_num_threads", 1)
+
+        # Output params
+        self.declare_parameter("detections_topic", "/person_detections")
+        self.declare_parameter("percent_topic", "/PT/percent")
+        self.declare_parameter("no_person_percent", 0.0)
+
+        # Debug params
         self.declare_parameter("publish_debug_image", False)
+        self.declare_parameter("debug_image_topic", "/person_debug_image")
+        self.declare_parameter("show_window", True)
+        self.declare_parameter("window_name", "Person Detection + Max Percent")
 
         self.image_topic = str(self.get_parameter("image_topic").value)
         self.model_path = str(self.get_parameter("model").value)
         self.conf_thres = float(self.get_parameter("conf").value)
         self.iou_thres = float(self.get_parameter("iou").value)
+
+        self.provider_mode = str(self.get_parameter("provider").value).strip().lower()
+        self.gpu_device_id = int(self.get_parameter("gpu_device_id").value)
+        self.gpu_mem_limit_mb = int(self.get_parameter("gpu_mem_limit_mb").value)
+        self.trt_fp16 = bool(self.get_parameter("trt_fp16").value)
+        self.trt_workspace_mb = int(self.get_parameter("trt_workspace_mb").value)
+        self.trt_engine_cache_enable = bool(self.get_parameter("trt_engine_cache_enable").value)
+        self.trt_engine_cache_path = str(self.get_parameter("trt_engine_cache_path").value)
+        self.intra_threads = int(self.get_parameter("intra_op_num_threads").value)
+        self.inter_threads = int(self.get_parameter("inter_op_num_threads").value)
+
+        self.detections_topic = str(self.get_parameter("detections_topic").value)
+        self.percent_topic = str(self.get_parameter("percent_topic").value)
+        self.no_person_percent = float(self.get_parameter("no_person_percent").value)
+
         self.publish_debug = bool(self.get_parameter("publish_debug_image").value)
+        self.debug_image_topic = str(self.get_parameter("debug_image_topic").value)
+
+        self.show_window = bool(self.get_parameter("show_window").value)
+        self.window_name = str(self.get_parameter("window_name").value)
 
         self.bridge = CvBridge()
         self._logged_output_shape = False
+        self.outdata = 0.0
 
         if not os.path.isfile(self.model_path):
             self.get_logger().fatal(f"Model not found: {self.model_path}")
             raise FileNotFoundError(self.model_path)
 
-        self.session = ort.InferenceSession(
-            self.model_path,
-            providers=["CPUExecutionProvider"]
-        )
+        self.session = self._build_ort_session()
 
         inp = self.session.get_inputs()[0]
         self.input_name = inp.name
@@ -131,7 +171,13 @@ class YoloV8PersonDetector(Node):
 
         self.pub_det = self.create_publisher(
             Detection2DArray,
-            "/person_detections",
+            self.detections_topic,
+            10,
+        )
+
+        self.pub_percent = self.create_publisher(
+            Float32,
+            self.percent_topic,
             10,
         )
 
@@ -139,20 +185,100 @@ class YoloV8PersonDetector(Node):
         if self.publish_debug:
             self.pub_dbg = self.create_publisher(
                 Image,
-                "/person_debug_image",
+                self.debug_image_topic,
                 10,
             )
+
+        if self.show_window:
+            if os.environ.get("DISPLAY", "") == "":
+                self.get_logger().warn("show_window=true nhưng DISPLAY chưa có, tự tắt window.")
+                self.show_window = False
+            else:
+                cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+
+        self.create_timer(0.2, self.print_percent)
 
         self.get_logger().info(f"Image topic: {self.image_topic}")
         self.get_logger().info(f"Model: {self.model_path}")
         self.get_logger().info(f"Input size: {self.in_w}x{self.in_h}")
-        self.get_logger().info(f"Providers: {self.session.get_providers()}")
-        self.get_logger().info(
-            f"Thresholds: conf={self.conf_thres}, iou={self.iou_thres}"
-        )
-        self.get_logger().info("Publishing: /person_detections")
+        self.get_logger().info(f"Available providers: {ort.get_available_providers()}")
+        self.get_logger().info(f"Using providers: {self.session.get_providers()}")
+        self.get_logger().info(f"Provider mode: {self.provider_mode}")
+        self.get_logger().info(f"Thresholds: conf={self.conf_thres}, iou={self.iou_thres}")
+        self.get_logger().info(f"Publishing detections: {self.detections_topic}")
+        self.get_logger().info(f"Publishing percent: {self.percent_topic}")
         if self.publish_debug:
-            self.get_logger().info("Publishing: /person_debug_image")
+            self.get_logger().info(f"Publishing debug image: {self.debug_image_topic}")
+        if self.show_window:
+            self.get_logger().info(f"Show window: {self.window_name}")
+
+    def _build_ort_session(self):
+        sess_options = ort.SessionOptions()
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        sess_options.intra_op_num_threads = max(1, self.intra_threads)
+        sess_options.inter_op_num_threads = max(1, self.inter_threads)
+        sess_options.enable_cpu_mem_arena = True
+        sess_options.log_severity_level = 3
+
+        available = ort.get_available_providers()
+        providers = []
+
+        if self.provider_mode not in ("auto", "tensorrt", "cuda", "cpu"):
+            self.get_logger().warn(
+                f"provider={self.provider_mode} không hợp lệ -> dùng auto"
+            )
+            self.provider_mode = "auto"
+
+        if self.provider_mode != "cpu":
+            if self.provider_mode in ("auto", "tensorrt") and "TensorrtExecutionProvider" in available:
+                if self.trt_engine_cache_enable:
+                    os.makedirs(self.trt_engine_cache_path, exist_ok=True)
+
+                providers.append((
+                    "TensorrtExecutionProvider",
+                    {
+                        "device_id": self.gpu_device_id,
+                        "trt_fp16_enable": self.trt_fp16,
+                        "trt_max_workspace_size": self.trt_workspace_mb * 1024 * 1024,
+                        "trt_engine_cache_enable": self.trt_engine_cache_enable,
+                        "trt_engine_cache_path": self.trt_engine_cache_path,
+                    }
+                ))
+
+            if self.provider_mode in ("auto", "cuda", "tensorrt") and "CUDAExecutionProvider" in available:
+                providers.append((
+                    "CUDAExecutionProvider",
+                    {
+                        "device_id": self.gpu_device_id,
+                        "gpu_mem_limit": self.gpu_mem_limit_mb * 1024 * 1024,
+                        "arena_extend_strategy": "kNextPowerOfTwo",
+                        "cudnn_conv_algo_search": "EXHAUSTIVE",
+                        "do_copy_in_default_stream": True,
+                    }
+                ))
+
+        providers.append("CPUExecutionProvider")
+
+        try:
+            session = ort.InferenceSession(
+                self.model_path,
+                sess_options=sess_options,
+                providers=providers,
+            )
+        except Exception as e:
+            self.get_logger().warn(
+                f"Không tạo được GPU session ({e}) -> fallback CPU."
+            )
+            session = ort.InferenceSession(
+                self.model_path,
+                sess_options=sess_options,
+                providers=["CPUExecutionProvider"],
+            )
+
+        return session
+
+    def print_percent(self):
+        self.get_logger().info(f"{self.outdata}")
 
     def preprocess(self, frame_bgr):
         img_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
@@ -308,6 +434,7 @@ class YoloV8PersonDetector(Node):
             return
 
         orig_h, orig_w = frame.shape[:2]
+        img_area = float(orig_w * orig_h) if orig_w > 0 and orig_h > 0 else 0.0
 
         try:
             inp, r, pad_x, pad_y = self.preprocess(frame)
@@ -321,24 +448,42 @@ class YoloV8PersonDetector(Node):
         det_array.header = msg.header
 
         debug_frame = frame.copy()
+        max_area_percent = None
 
         for x1, y1, x2, y2, score in dets:
             det_array.detections.append(
                 self.make_detection(msg.header, x1, y1, x2, y2, score)
             )
 
-            if self.publish_debug:
+            bw = max(0.0, float(x2 - x1))
+            bh = max(0.0, float(y2 - y1))
+            bbox_area = bw * bh
+
+            area_percent = 0.0
+            if img_area > 0.0:
+                area_percent = (bbox_area / img_area) * 100.0
+                area_percent = max(0.0, min(100.0, area_percent))
+
+            if max_area_percent is None or area_percent > max_area_percent:
+                max_area_percent = area_percent
+
+            if self.show_window or self.publish_debug:
+                ix1 = max(0, min(int(x1), orig_w - 1))
+                iy1 = max(0, min(int(y1), orig_h - 1))
+                ix2 = max(0, min(int(x2), orig_w - 1))
+                iy2 = max(0, min(int(y2), orig_h - 1))
+
                 cv2.rectangle(
                     debug_frame,
-                    (int(x1), int(y1)),
-                    (int(x2), int(y2)),
+                    (ix1, iy1),
+                    (ix2, iy2),
                     (0, 255, 0),
                     2,
                 )
                 cv2.putText(
                     debug_frame,
-                    f"person {score:.2f}",
-                    (int(x1), max(0, int(y1) - 8)),
+                    f"person {score:.2f} | {area_percent:.2f}%",
+                    (ix1, max(0, iy1 - 8)),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.6,
                     (0, 255, 0),
@@ -346,6 +491,22 @@ class YoloV8PersonDetector(Node):
                 )
 
         self.pub_det.publish(det_array)
+
+        out = Float32()
+        out.data = float(self.no_person_percent) if max_area_percent is None else float(max_area_percent)
+        self.pub_percent.publish(out)
+        self.outdata = out.data
+
+        if self.show_window or self.publish_debug:
+            cv2.putText(
+                debug_frame,
+                f"Max Percent: {out.data:.2f}%",
+                (20, 35),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                (0, 0, 255),
+                2,
+            )
 
         if self.publish_debug and self.pub_dbg is not None:
             try:
@@ -355,12 +516,29 @@ class YoloV8PersonDetector(Node):
             except Exception as e:
                 self.get_logger().error(f"debug publish error: {e}")
 
+        if self.show_window:
+            cv2.imshow(self.window_name, debug_frame)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                self.get_logger().info("Pressed 'q' -> shutting down node")
+                rclpy.shutdown()
+
+    def destroy_node(self):
+        if self.show_window:
+            try:
+                cv2.destroyWindow(self.window_name)
+            except Exception:
+                pass
+        super().destroy_node()
+
 
 def main(args=None):
     rclpy.init(args=args)
-    node = YoloV8PersonDetector()
+    node = YoloPersonPercentNode()
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
         node.destroy_node()
         if rclpy.ok():
